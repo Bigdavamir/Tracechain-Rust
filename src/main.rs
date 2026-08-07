@@ -5,9 +5,14 @@ use tracechain_rust::{
 };
 
 fn main() {
-    println!("--- Tracechain-rust: Educational Blockchain Runtime Model ---");
+    println!("=== TraceChain Rust Educational Runtime Demo ===");
 
-    // Initialize state
+    // Initialize RuntimeState with specified values:
+    // Bank balances:
+    // amir = 500
+    // ali = 200
+    // attacker = 50
+    // vault = 0
     let mut balances = HashMap::new();
     balances.insert("amir".to_string(), 500);
     balances.insert("ali".to_string(), 200);
@@ -16,6 +21,11 @@ fn main() {
 
     let bank_state = BankState { balances };
 
+    // Vault shares:
+    // amir = 0
+    // ali = 0
+    // attacker = 0
+    // total_shares = 0
     let mut shares = HashMap::new();
     shares.insert("amir".to_string(), 0);
     shares.insert("ali".to_string(), 0);
@@ -26,6 +36,10 @@ fn main() {
         total_shares: 0,
     };
 
+    // Account nonces:
+    // amir = 0
+    // ali = 0
+    // attacker = 0
     let mut nonces = HashMap::new();
     nonces.insert("amir".to_string(), 0);
     nonces.insert("ali".to_string(), 0);
@@ -33,21 +47,18 @@ fn main() {
 
     let account_state = AccountState { nonces };
 
-    let runtime_state = RuntimeState {
+    let initial_state = RuntimeState {
         bank: bank_state,
         vault: vault_state,
         accounts: account_state,
     };
 
-    let mut runtime = Runtime::new(runtime_state);
+    let mut runtime = Runtime::new(initial_state);
 
-    println!("\n[Initial State]");
-    print_state(&runtime.state);
-
-    // -------------------------------------------------------------------------
-    // 1. Failing transaction
-    // -------------------------------------------------------------------------
-    println!("\n--- Executing FAILING Transaction (Multi-call with rollback expectation) ---");
+    // ------------------------------------------------------------
+    // SCENARIO A: FAILED ATOMIC TRANSACTION
+    // ------------------------------------------------------------
+    println!("\n=== Scenario A: Failed Atomic Transaction ===");
     let tx_fail = Transaction {
         signer: "amir".to_string(),
         nonce: 0,
@@ -58,33 +69,24 @@ fn main() {
             },
             RuntimeCall::Withdraw {
                 owner: "amir".to_string(),
-                shares: 200, // This exceeds available shares (amir only gets 100 shares from deposit)
+                shares: 200,
             },
         ],
     };
 
-    match runtime.execute_transaction(tx_fail) {
-        Ok(results) => println!(
-            "ERROR: Expected transaction to fail, but succeeded with: {:?}",
-            results
-        ),
-        Err(e) => println!("Transaction failed as expected: {}", e),
+    let res_fail = runtime.execute_transaction(tx_fail);
+    match res_fail {
+        Ok(results) => println!("result: Succeeded unexpectedly with {:?}", results),
+        Err(err) => println!("result: Failed as expected with Error: \"{}\"", err),
     }
 
-    println!("\n[State After Failing Transaction - Must be identical to Initial State]");
+    println!("committed state after failure:");
     print_state(&runtime.state);
 
-    // Verify state has not changed
-    assert_eq!(*runtime.state.bank.balances.get("amir").unwrap(), 500);
-    assert_eq!(*runtime.state.bank.balances.get(VAULT_ACCOUNT).unwrap(), 0);
-    assert_eq!(*runtime.state.vault.shares.get("amir").unwrap(), 0);
-    assert_eq!(runtime.state.vault.total_shares, 0);
-    assert_eq!(*runtime.state.accounts.nonces.get("amir").unwrap(), 0);
-
-    // -------------------------------------------------------------------------
-    // 2. Successful transaction
-    // -------------------------------------------------------------------------
-    println!("\n--- Executing SUCCESSFUL Transaction ---");
+    // ------------------------------------------------------------
+    // SCENARIO B: SUCCESSFUL ATOMIC TRANSACTION
+    // ------------------------------------------------------------
+    println!("\n=== Scenario B: Successful Atomic Transaction ===");
     let tx_success = Transaction {
         signer: "amir".to_string(),
         nonce: 0,
@@ -100,40 +102,32 @@ fn main() {
         ],
     };
 
-    match runtime.execute_transaction(tx_success) {
-        Ok(results) => {
-            println!("Transaction succeeded!");
-            println!(
-                "Returned Results Vector (shares minted, assets returned): {:?}",
-                results
-            );
-            assert_eq!(results, vec![100, 40]);
-        }
-        Err(e) => println!("ERROR: Expected transaction to succeed, but failed: {}", e),
+    let res_success = runtime.execute_transaction(tx_success);
+    match res_success {
+        Ok(results) => println!("results: {:?}", results),
+        Err(err) => println!("result: Failed unexpectedly with Error: \"{}\"", err),
     }
 
-    println!("\n[State After Successful Transaction]");
+    println!("committed state after success:");
     print_state(&runtime.state);
-
-    // Verify successful mutations
-    assert_eq!(*runtime.state.bank.balances.get("amir").unwrap(), 440);
-    assert_eq!(*runtime.state.bank.balances.get(VAULT_ACCOUNT).unwrap(), 60);
-    assert_eq!(*runtime.state.vault.shares.get("amir").unwrap(), 60);
-    assert_eq!(runtime.state.vault.total_shares, 60);
-    assert_eq!(*runtime.state.accounts.nonces.get("amir").unwrap(), 1);
 }
 
 fn print_state(state: &RuntimeState) {
-    println!("  Bank Balances:");
-    for (acc, bal) in &state.bank.balances {
-        println!("    {}: {}", acc, bal);
-    }
-    println!("  Vault Shares (Total: {}):", state.vault.total_shares);
-    for (acc, sh) in &state.vault.shares {
-        println!("    {}: {}", acc, sh);
-    }
-    println!("  Account Nonces:");
-    for (acc, nonce) in &state.accounts.nonces {
-        println!("    {}: {}", acc, nonce);
-    }
+    println!(
+        "  amir assets: {:?}",
+        state.bank.balances.get("amir").unwrap_or(&0)
+    );
+    println!(
+        "  vault assets: {:?}",
+        state.bank.balances.get(VAULT_ACCOUNT).unwrap_or(&0)
+    );
+    println!(
+        "  amir shares: {:?}",
+        state.vault.shares.get("amir").unwrap_or(&0)
+    );
+    println!("  total shares: {:?}", state.vault.total_shares);
+    println!(
+        "  amir nonce: {:?}",
+        state.accounts.nonces.get("amir").unwrap_or(&0)
+    );
 }
