@@ -1,3 +1,4 @@
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::collections::HashMap;
 
 // ============================================================
@@ -10,6 +11,17 @@ pub type Shares = u64;
 pub type Nonce = u64;
 
 pub const VAULT_ACCOUNT: &str = "vault";
+
+// ============================================================
+// EDUCATIONAL HELPER
+// ============================================================
+
+pub fn write_string(bytes: &mut Vec<u8>, value: &str) {
+    let length = value.len() as u64;
+    let length_bytes = length.to_be_bytes();
+    bytes.extend_from_slice(&length_bytes);
+    bytes.extend_from_slice(value.as_bytes());
+}
 
 // ============================================================
 // 2. BANK STATE
@@ -215,6 +227,7 @@ impl<'a> VaultModule<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccountState {
     pub nonces: HashMap<AccountId, Nonce>,
+    pub public_keys: HashMap<AccountId, [u8; 32]>,
 }
 
 // ============================================================
@@ -271,6 +284,80 @@ pub struct Transaction {
     pub signer: AccountId,
     pub nonce: Nonce,
     pub calls: Vec<RuntimeCall>,
+    pub signature: Vec<u8>,
+}
+
+impl Transaction {
+    pub fn sign_bytes(&self, chain_id: &str) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::new();
+
+        // 1. chain_id
+        write_string(&mut bytes, chain_id);
+
+        // 2. signer
+        write_string(&mut bytes, &self.signer);
+
+        // 3. nonce
+        bytes.extend_from_slice(&self.nonce.to_be_bytes());
+
+        // 4. number of calls
+        let num_calls = self.calls.len() as u64;
+        bytes.extend_from_slice(&num_calls.to_be_bytes());
+
+        // 5. every call in transaction order
+        for call in &self.calls {
+            match call {
+                RuntimeCall::Deposit { sender, amount } => {
+                    write_string(&mut bytes, "deposit");
+                    write_string(&mut bytes, sender);
+                    bytes.extend_from_slice(&amount.to_be_bytes());
+                }
+                RuntimeCall::Withdraw { owner, shares } => {
+                    write_string(&mut bytes, "withdraw");
+                    write_string(&mut bytes, owner);
+                    bytes.extend_from_slice(&shares.to_be_bytes());
+                }
+            }
+        }
+
+        bytes
+    }
+}
+
+// ============================================================
+// SIGNATURE VERIFICATION HELPER
+// ============================================================
+
+pub fn verify_signature(
+    tx: &Transaction,
+    public_key_bytes: &[u8; 32],
+    sign_bytes: &[u8],
+) -> Result<(), String> {
+    // 1. Convert public-key bytes into an Ed25519 VerifyingKey.
+    let verifying_key_res = VerifyingKey::from_bytes(public_key_bytes);
+    let verifying_key = match verifying_key_res {
+        Ok(key) => key,
+        Err(_) => {
+            return Err("invalid public key".to_string());
+        }
+    };
+
+    // 2. Convert the raw signature bytes into the library Signature type.
+    let raw_signature = tx.signature.as_slice();
+    let signature_res = Signature::from_slice(raw_signature);
+    let signature = match signature_res {
+        Ok(sig) => sig,
+        Err(_) => {
+            return Err("invalid signature".to_string());
+        }
+    };
+
+    // 3. Cryptographically verify public key + sign bytes + signature.
+    let verification_res = verifying_key.verify(sign_bytes, &signature);
+    match verification_res {
+        Ok(()) => Ok(()),
+        Err(_) => Err("invalid signature".to_string()),
+    }
 }
 
 // ============================================================
@@ -280,29 +367,43 @@ pub struct Transaction {
 pub struct TransactionValidator;
 
 impl TransactionValidator {
-    pub fn validate(tx: &Transaction, account_state: &AccountState) -> Result<(), String> {
-        // 1. For every call
-        for call in &tx.calls {
-            // 2. Get required_signer
-            let required_signer = call.required_signer();
+    pub fn validate(
+        tx: &Transaction,
+        account_state: &AccountState,
+        chain_id: &str,
+    ) -> Result<(), String> {
+        // STEP 1 — Registered Public Key
+        let found_pubkey = account_state.public_keys.get(&tx.signer);
+        let public_key = match found_pubkey {
+            Some(key) => key,
+            None => {
+                return Err("unknown signer".to_string());
+            }
+        };
 
-            // 3. If required_signer != tx.signer
+        // STEP 2 — Rebuild SignBytes
+        let sign_bytes = tx.sign_bytes(chain_id);
+
+        // STEP 3 — Authentication
+        verify_signature(tx, public_key, &sign_bytes)?;
+
+        // STEP 4 — Authorization
+        for call in &tx.calls {
+            let required_signer = call.required_signer();
             if required_signer != tx.signer {
                 return Err("unauthorized signer".to_string());
             }
         }
 
-        // 4. Read expected nonce from account_state using tx.signer
-        let found = account_state.nonces.get(&tx.signer);
-        let expected_nonce_ref = found.unwrap_or(&0);
+        // STEP 5 — Replay Protection
+        let found_nonce = account_state.nonces.get(&tx.signer);
+        let expected_nonce_ref = found_nonce.unwrap_or(&0);
         let expected_nonce = *expected_nonce_ref;
 
-        // 5. If tx.nonce != expected nonce
         if tx.nonce != expected_nonce {
             return Err("invalid nonce".to_string());
         }
 
-        // 6. Return Ok(())
         Ok(())
     }
 }
@@ -335,11 +436,12 @@ pub struct RuntimeState {
 
 pub struct Runtime {
     pub state: RuntimeState,
+    pub chain_id: String,
 }
 
 impl Runtime {
-    pub fn new(state: RuntimeState) -> Self {
-        Self { state }
+    pub fn new(state: RuntimeState, chain_id: String) -> Self {
+        Self { state, chain_id }
     }
 
     // ============================================================
@@ -361,7 +463,7 @@ impl Runtime {
     pub fn execute_transaction(&mut self, tx: Transaction) -> Result<Vec<u64>, String> {
         let mut cached_state = self.state.clone();
 
-        TransactionValidator::validate(&tx, &cached_state.accounts)?;
+        TransactionValidator::validate(&tx, &cached_state.accounts, &self.chain_id)?;
 
         let signer = tx.signer.clone();
         let mut results: Vec<u64> = Vec::new();
